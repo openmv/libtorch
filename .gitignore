@@ -1,0 +1,5 @@
+# Build inputs and outputs, see tools/ci.sh.
+/executorch/
+/build/
+/libtorch-*.a
+/*-headers/

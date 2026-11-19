@@ -1,0 +1,150 @@
+name: 'Build ExecuTorch'
+
+on:
+  push:
+    branches:
+      - 'main'
+    paths:
+      - '.github/workflows/*.yml'
+      - '.github/workflows/*.json'
+      - 'patches/**'
+      - 'tools/**'
+      - 'requirements.txt'
+      - '!**/README.md'
+
+  pull_request:
+    branches:
+      - 'main'
+    types:
+      - opened
+      - edited
+      - reopened
+      - synchronize
+    paths:
+      - '.github/workflows/*.yml'
+      - '.github/workflows/*.json'
+      - 'patches/**'
+      - 'tools/**'
+      - 'requirements.txt'
+      - '!**/README.md'
+
+jobs:
+  build-torch:
+    runs-on: ubuntu-24.04
+
+    strategy:
+      matrix:
+        target:
+          - {name: cortex-m7, cpu: cortex-m7, fpu: fpv5-sp-d16}
+          - {name: cortex-m55, cpu: cortex-m55, fpu: fpv5-d16}
+      fail-fast: true
+
+    steps:
+    - name: 'Checkout main'
+      uses: actions/checkout@v4
+      with:
+        submodules: false
+
+    - name: 'Checkout ExecuTorch'
+      uses: actions/checkout@v4
+      with:
+        submodules: false
+        path: executorch
+        repository: pytorch/executorch
+        ref: v1.6.0
+
+    - name: 'Caching dependencies'
+      uses: actions/cache@v4
+      id: cache
+      with:
+        path: ~/cache/gcc
+        key: 'arm-gnu-toolchain-14.3.rel1'
+
+    - name: 'Install toolchain'
+      if: steps.cache.outputs.cache-hit != 'true'
+      run: source tools/ci.sh && ci_install_arm_gcc
+
+    - name: 'Set up Python'
+      uses: actions/setup-python@v5
+      with:
+        cache: 'pip'
+        python-version: "3.12.4"
+
+    - name: 'Install dependencies'
+      run: |
+        python -m pip install --break-system-packages --upgrade pip -r requirements.txt
+
+    - name: 'Update ExecuTorch submodules'
+      run: source tools/ci.sh && ci_update_submodules
+
+    - name: 'Patch ExecuTorch'
+      run: source tools/ci.sh && ci_apply_patches
+
+    - name: 'Build ExecuTorch'
+      run: |
+        source tools/ci.sh
+        ci_build_target ${{ matrix.target.name }} \
+                        ${{ matrix.target.cpu }} \
+                        ${{ matrix.target.fpu }}
+
+    - name: 'Upload library'
+      uses: actions/upload-artifact@v4
+      with:
+        name: libtorch-${{ matrix.target.name }}
+        path: libtorch-*${{ matrix.target.name }}.a
+        retention-days: 1
+        if-no-files-found: error
+
+    - name: 'Build headers'
+      run: |
+        source tools/ci.sh
+        ci_build_headers ${{ matrix.target.name }}
+
+    - name: 'Upload headers'
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ matrix.target.name }}-headers
+        path: ${{ matrix.target.name }}-headers
+        retention-days: 1
+        if-no-files-found: error
+
+  push-artifacts:
+    runs-on: ubuntu-24.04
+    needs: [build-torch]
+    if: github.event_name == 'push'
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+    - name: 'Checkout repository'
+      uses: actions/checkout@v4
+      with:
+        submodules: false
+
+    - name: 'Download artifacts'
+      uses: actions/download-artifact@v4
+      with:
+        path: lib/
+        pattern: 'libtorch-*'
+        merge-multiple: true
+
+    - name: 'Download artifacts'
+      uses: actions/download-artifact@v4
+      with:
+        pattern: '*-headers'
+
+    - name: 'Update headers'
+      run: |
+        rsync -av --delete --include='*/' --include='LICENSE' --include='*.h' --exclude='*' --delete *-headers/ include
+        rm -fr *-headers
+
+    - name: 'Create Pull Request'
+      uses: peter-evans/create-pull-request@v5
+      with:
+        base: main
+        branch: update_torch
+        title: Update torch libraries and headers.
+        commit-message: Update torch libraries and headers.
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

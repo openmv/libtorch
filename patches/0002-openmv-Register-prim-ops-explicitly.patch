@@ -1,0 +1,23 @@
+diff --git a/kernels/prim_ops/register_prim_ops.cpp b/kernels/prim_ops/register_prim_ops.cpp
+index 483b7c8..ba4e2c4 100644
+--- a/kernels/prim_ops/register_prim_ops.cpp
++++ b/kernels/prim_ops/register_prim_ops.cpp
+@@ -776,12 +776,13 @@ static Kernel prim_ops[] = {
+ executorch::runtime::Span<const executorch::ET_RUNTIME_NAMESPACE::Kernel>
+     kernel_span(prim_ops, prim_ops + sizeof(prim_ops) / sizeof(Kernel));
+ 
+-// Return value not used. Keep the static variable assignment to register
+-// operators in static initialization time.
+-auto success_with_kernel_reg =
+-    executorch::ET_RUNTIME_NAMESPACE::register_kernels(kernel_span);
+-
+ } // namespace
++
++// OpenMV: register explicitly instead of from a static initializer, which
++// does not run on all ports.
++executorch::runtime::Error register_prim_ops() {
++  return executorch::ET_RUNTIME_NAMESPACE::register_kernels(kernel_span);
++}
+ } // namespace function
+ } // namespace executor
+ } // namespace torch

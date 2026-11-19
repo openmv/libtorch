@@ -1,0 +1,95 @@
+diff --git a/kernels/portable/cpu/util/broadcast_util.cpp b/kernels/portable/cpu/util/broadcast_util.cpp
+index 28a3442..f084d04 100644
+--- a/kernels/portable/cpu/util/broadcast_util.cpp
++++ b/kernels/portable/cpu/util/broadcast_util.cpp
+@@ -19,6 +19,8 @@ namespace executor {
+ using Tensor = executorch::aten::Tensor;
+ using ScalarType = executorch::aten::ScalarType;
+ 
++// OpenMV: deprecated and unused heap-allocating helpers removed (no malloc).
++#if 0
+ void free_broadcast_tensor(const Tensor& broadcast_tensor) {
+   free((void*)broadcast_tensor.const_data_ptr());
+   free((void*)broadcast_tensor.sizes().data());
+@@ -75,6 +77,7 @@ Tensor make_tensor(
+ }
+ 
+ } // namespace
++#endif
+ 
+ bool tensor_is_broadcastable_to(
+     const executorch::aten::ArrayRef<Tensor::SizesType> broadcast_from_shape,
+@@ -136,6 +139,7 @@ bool tensors_are_broadcastable_between(const Tensor& a, const Tensor& b) {
+   return tensors_are_broadcastable_between(a.sizes(), b.sizes());
+ }
+ 
++#if 0
+ // Broadcast tensor broadcast_from to match broadcast_to's shape, and return the
+ // broadcasted tensor.
+ Tensor broadcast_tensor(
+@@ -207,6 +211,7 @@ Tensor broadcast_tensor(
+ 
+   return out;
+ }
++#endif
+ 
+ ET_NODISCARD Error get_broadcast_target_size(
+     const executorch::aten::ArrayRef<Tensor::SizesType> a_size,
+diff --git a/runtime/executor/method.cpp b/runtime/executor/method.cpp
+index 90618c7..1a00ecd 100644
+--- a/runtime/executor/method.cpp
++++ b/runtime/executor/method.cpp
+@@ -14,6 +14,7 @@
+ #include <cinttypes> // @donotremove
+ #include <cstdint>
+ #include <cstdio>
++#include <cstring>
+ 
+ #include <executorch/runtime/backend/interface.h>
+ #include <executorch/runtime/core/event_tracer_hooks.h>
+@@ -769,25 +770,29 @@ Error populate_operator_name(
+ 
+   ET_CHECK_OR_RETURN_ERROR(
+       op->name() != nullptr, InvalidProgram, "Missing operator name");
+-  int cx = snprintf(
+-      operator_name,
+-      operator_name_size,
+-      "%s%s%s",
++  // OpenMV: build "name[.overload]" without snprintf, to avoid pulling in
++  // the libc printf implementation.
++  const char* parts[3] = {
+       op->name()->c_str(),
+       // Don't append any overload if the overload string is empty.
+       has_overload ? "." : "",
+-      has_overload ? op->overload()->c_str() : "");
+-  ET_CHECK_OR_RETURN_ERROR(cx >= 0, Internal, "snprintf failed: %d", cx);
+-  ET_CHECK_OR_RETURN_ERROR(
+-      static_cast<size_t>(cx) < operator_name_size,
+-      Internal,
+-      "Operator name %s%s%s with length %d "
+-      "truncated to %" ET_PRIsize_t " due to internal buffer limit.",
+-      op->name()->c_str(),
+-      has_overload ? "." : "",
+-      has_overload ? op->overload()->c_str() : "",
+-      cx,
+-      operator_name_size);
++      has_overload ? op->overload()->c_str() : ""};
++  size_t cx = 0;
++  for (const char* part : parts) {
++    size_t len = strlen(part);
++    ET_CHECK_OR_RETURN_ERROR(
++        cx + len < operator_name_size,
++        Internal,
++        "Operator name %s%s%s truncated to %" ET_PRIsize_t
++        " due to internal buffer limit.",
++        parts[0],
++        parts[1],
++        parts[2],
++        operator_name_size);
++    memcpy(operator_name + cx, part, len);
++    cx += len;
++  }
++  operator_name[cx] = '\0';
+ 
+   return Error::Ok;
+ }
