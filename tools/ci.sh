@@ -9,6 +9,7 @@
 ########################################################################################
 ET_REPO_PATH=executorch
 ET_SUBMODULES="third-party/json third-party/gflags third-party/flatbuffers third-party/flatcc backends/xnnpack/third-party/FXdiv"
+CMSIS_NN_VERSION=v8.0.0
 TOOLCHAIN_PATH=${HOME}/cache/gcc
 export PATH=${TOOLCHAIN_PATH}/bin:${PATH}
 TOOLCHAIN_URL="https://developer.arm.com/-/media/Files/downloads/gnu/14.3.rel1/binrel/arm-gnu-toolchain-14.3.rel1-x86_64-arm-none-eabi.tar.xz"
@@ -144,7 +145,9 @@ ci_build_target() {
     TARGET_CXXFLAGS="${TARGET_FLAGS} -fno-rtti -fno-exceptions -fno-unwind-tables \
 -fno-use-cxa-atexit -fno-threadsafe-statics"
 
-    # Build the runtime, the prim ops (executorch), the kernel libraries and CMSIS-NN.
+    # Build the runtime, the prim ops (executorch) and the kernel libraries. CMSIS-NN
+    # is provided by the firmware; it is only downloaded here for its headers, and its
+    # version must match the firmware's.
     # Kernel registration is generated below (manual registration), so the upstream
     # ops_lib targets, which register from static initializers, are not built.
     cmake -S ${ET_DIR} -B ${BUILD_DIR} \
@@ -171,10 +174,11 @@ ci_build_target() {
         -DEXECUTORCH_ENABLE_LOGGING=OFF \
         -DEXECUTORCH_ENABLE_PROGRAM_VERIFICATION=OFF \
         -DEXECUTORCH_OPTIMIZE_SIZE=OFF \
-        -DEXECUTORCH_PAL_DEFAULT=minimal
+        -DEXECUTORCH_PAL_DEFAULT=minimal \
+        -DCMSIS_NN_VERSION=${CMSIS_NN_VERSION}
     cmake --build ${BUILD_DIR} -j$(nproc) --target \
         executorch_core executorch portable_kernels kernels_util_all_deps \
-        quantized_kernels cortex_m_kernels cmsis-nn
+        quantized_kernels cortex_m_kernels
 
     # Generate one manual registration function per kernel library. The libraries are
     # generated separately because the codegen indexes kernels by name without the
@@ -255,8 +259,7 @@ EOF
     done
     arm-none-eabi-ar rcs ${GEN_DIR}/libregister.a ${REGISTER_OBJS}
 
-    # Merge everything except CMSIS-NN into a single archive. CMSIS-NN is kept in a
-    # separate archive so the firmware can share one CMSIS-NN between libraries.
+    # Merge everything into a single archive.
     {
         echo "CREATE libtorch-${TARGET_NAME}.a"
         for lib in libexecutorch_core.a \
@@ -271,7 +274,6 @@ EOF
         echo "SAVE"
         echo "END"
     } | arm-none-eabi-ar -M
-    cp ${BUILD_DIR}/backends/cortex_m/cmsis_nn-build/libcmsis-nn.a libtorch-cmsis-nn-${TARGET_NAME}.a
 }
 
 # Build Headers.
