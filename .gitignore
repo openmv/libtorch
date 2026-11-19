@@ -3,3 +3,4 @@
 /build/
 /libtorch-*.a
 /*-headers/
+/ethos-u-sdk/

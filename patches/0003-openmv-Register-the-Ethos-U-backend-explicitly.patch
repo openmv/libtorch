@@ -1,0 +1,27 @@
+diff --git a/backends/arm/runtime/EthosUBackend.cpp b/backends/arm/runtime/EthosUBackend.cpp
+index bd400fb..87530fb 100644
+--- a/backends/arm/runtime/EthosUBackend.cpp
++++ b/backends/arm/runtime/EthosUBackend.cpp
+@@ -510,13 +510,15 @@ void calculate_dimensions(
+   }
+ }
+ 
+-namespace {
+-auto EthosUBackend_backend = EthosUBackend();
+-Backend EthosUBackend_id{"EthosUBackend", &EthosUBackend_backend};
+-static executorch::runtime::Error EthosUBackend_registered =
+-    register_backend(EthosUBackend_id);
+-
+-} // namespace
++// OpenMV: register explicitly instead of from a static initializer, which
++// does not run on all ports. The backend is constructed in static storage so
++// no destructor is registered.
++executorch::runtime::Error register_ethos_u_backend() {
++  alignas(EthosUBackend) static uint8_t backend_storage[sizeof(EthosUBackend)];
++  static Backend backend_id{
++      "EthosUBackend", new (backend_storage) EthosUBackend()};
++  return register_backend(backend_id);
++}
+ 
+ } // namespace arm
+ } // namespace backends

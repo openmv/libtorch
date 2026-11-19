@@ -10,6 +10,10 @@
 ET_REPO_PATH=executorch
 ET_SUBMODULES="third-party/json third-party/gflags third-party/flatbuffers third-party/flatcc backends/xnnpack/third-party/FXdiv"
 CMSIS_NN_VERSION=v8.0.0
+ETHOSU_DRIVER_URL="https://gitlab.arm.com/artificial-intelligence/ethos-u/ethos-u-core-driver.git"
+ETHOSU_DRIVER_TAG=26.08
+ETHOS_SDK_PATH=ethos-u-sdk
+ETHOSU_DRIVER_PATH=${ETHOS_SDK_PATH}/core_software/core_driver
 TOOLCHAIN_PATH=${HOME}/cache/gcc
 export PATH=${TOOLCHAIN_PATH}/bin:${PATH}
 TOOLCHAIN_URL="https://developer.arm.com/-/media/Files/downloads/gnu/14.3.rel1/binrel/arm-gnu-toolchain-14.3.rel1-x86_64-arm-none-eabi.tar.xz"
@@ -120,6 +124,13 @@ ci_update_submodules() {
     git -C ${ET_REPO_PATH} submodule update --init --depth=1 ${ET_SUBMODULES}
 }
 
+# Clone the Ethos-U core driver. Only its headers are used, the driver is provided by
+# the firmware. The version must match the firmware's.
+########################################################################################
+ci_clone_ethosu_driver() {
+    git clone --depth=1 --branch ${ETHOSU_DRIVER_TAG} ${ETHOSU_DRIVER_URL} ${ETHOSU_DRIVER_PATH}
+}
+
 # Apply ExecuTorch patches.
 ########################################################################################
 ci_apply_patches() {
@@ -134,6 +145,7 @@ ci_build_target() {
     TARGET_NAME=${1}
     TARGET_CPU=${2}
     TARGET_FPU=${3}
+    TARGET_NPU=${4}
 
     BUILD_DIR=$(pwd)/build/${TARGET_NAME}
     GEN_DIR=${BUILD_DIR}/gen
@@ -142,6 +154,16 @@ ci_build_target() {
 
     TARGET_FLAGS="-mthumb -mcpu=${TARGET_CPU} -mtune=${TARGET_CPU} -mfpu=${TARGET_FPU} -mfloat-abi=hard \
 -fdata-sections -ffunction-sections -Wno-psabi"
+
+    # The Ethos-U delegate is built against the core driver headers, with the same
+    # configuration as the firmware's driver.
+    NPU_ARGS="-DEXECUTORCH_BUILD_ARM_BAREMETAL=OFF"
+    NPU_LIBS=""
+    if [ "${TARGET_NPU}" == "ethos-u" ]; then
+        TARGET_FLAGS="${TARGET_FLAGS} -DETHOSU -DETHOSU_MULTI_VARIANT"
+        NPU_ARGS="-DEXECUTORCH_BUILD_ARM_BAREMETAL=ON -DETHOS_SDK_PATH=$(pwd)/${ETHOS_SDK_PATH}"
+        NPU_LIBS="executorch_delegate_ethos_u"
+    fi
     TARGET_CXXFLAGS="${TARGET_FLAGS} -fno-rtti -fno-exceptions -fno-unwind-tables \
 -fno-use-cxa-atexit -fno-threadsafe-statics"
 
@@ -165,7 +187,7 @@ ci_build_target() {
         -DCMAKE_POSITION_INDEPENDENT_CODE=OFF \
         -DPYTHON_EXECUTABLE=${PYTHON} \
         -DEXECUTORCH_BUILD_PRESET_FILE=${ET_DIR}/tools/cmake/preset/arm_baremetal.cmake \
-        -DEXECUTORCH_BUILD_ARM_BAREMETAL=OFF \
+        ${NPU_ARGS} \
         -DEXECUTORCH_BUILD_PTHREADPOOL=OFF \
         -DEXECUTORCH_BUILD_CPUINFO=OFF \
         -DEXECUTORCH_BUILD_EXTENSION_RUNNER_UTIL=OFF \
@@ -178,7 +200,7 @@ ci_build_target() {
         -DCMSIS_NN_VERSION=${CMSIS_NN_VERSION}
     cmake --build ${BUILD_DIR} -j$(nproc) --target \
         executorch_core executorch portable_kernels kernels_util_all_deps \
-        quantized_kernels cortex_m_kernels
+        quantized_kernels cortex_m_kernels ${NPU_LIBS}
 
     # Generate one manual registration function per kernel library. The libraries are
     # generated separately because the codegen indexes kernels by name without the
@@ -208,7 +230,13 @@ ci_build_target() {
     done
     popd
 
-    # Entry point called by the firmware to register all kernels.
+    # Entry point called by the firmware to register all kernels and backends.
+    REGISTER_NPU_DECL=""
+    REGISTER_NPU_CALL=""
+    if [ "${TARGET_NPU}" == "ethos-u" ]; then
+        REGISTER_NPU_DECL="namespace executorch::backends::arm { executorch::runtime::Error register_ethos_u_backend(); }"
+        REGISTER_NPU_CALL="if (err == Error::Ok) { err = executorch::backends::arm::register_ethos_u_backend(); }"
+    fi
     cat > ${GEN_DIR}/register_all.cpp << EOF
 #include <executorch/runtime/core/error.h>
 
@@ -224,6 +252,8 @@ Error register_prim_ops();
 } // namespace function
 } // namespace executor
 } // namespace torch
+
+${REGISTER_NPU_DECL}
 
 extern "C" int et_register_all(void) {
     static bool registered = false;
@@ -241,6 +271,7 @@ extern "C" int et_register_all(void) {
     if (err == Error::Ok) {
         err = torch::executor::register_cortex_m_kernels();
     }
+    ${REGISTER_NPU_CALL}
 
     registered = (err == Error::Ok);
     return static_cast<int>(err);
@@ -271,6 +302,9 @@ EOF
                    gen/libregister.a; do
             echo "ADDLIB ${BUILD_DIR}/${lib}"
         done
+        if [ "${TARGET_NPU}" == "ethos-u" ]; then
+            echo "ADDLIB ${BUILD_DIR}/backends/arm/libexecutorch_delegate_ethos_u.a"
+        fi
         echo "SAVE"
         echo "END"
     } | arm-none-eabi-ar -M
