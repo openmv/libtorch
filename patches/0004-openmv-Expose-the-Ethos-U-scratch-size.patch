@@ -1,0 +1,37 @@
+diff --git a/backends/arm/runtime/EthosUBackend.cpp b/backends/arm/runtime/EthosUBackend.cpp
+index 87530fb..01d8c45 100644
+--- a/backends/arm/runtime/EthosUBackend.cpp
++++ b/backends/arm/runtime/EthosUBackend.cpp
+@@ -126,6 +126,20 @@ class EthosUBackendExecuteCallbacks {
+   }
+ };
+ 
++// OpenMV: the largest Ethos-U scratch buffer required by the delegates
++// initialized since the last reset_ethos_u_scratch_size(). The scratch buffer
++// is allocated from the temp allocator on every execution, so this is used to
++// size the temp allocator after loading a method.
++static size_t ethos_u_scratch_size = 0;
++
++size_t get_ethos_u_scratch_size() {
++  return ethos_u_scratch_size;
++}
++
++void reset_ethos_u_scratch_size() {
++  ethos_u_scratch_size = 0;
++}
++
+ class EthosUBackend final : public ::executorch::runtime::BackendInterface {
+  public:
+   EthosUBackend() {}
+@@ -181,6 +195,11 @@ class EthosUBackend final : public ::executorch::runtime::BackendInterface {
+       return read_status;
+     }
+ 
++    // OpenMV: record the largest scratch buffer, see get_ethos_u_scratch_size().
++    if (handle->handles.scratch_data_size > ethos_u_scratch_size) {
++      ethos_u_scratch_size = handle->handles.scratch_data_size;
++    }
++
+     const VelaIOs* outputs = handle->handles.outputs;
+     const int output_count = outputs ? outputs->count : 0;
+     for (int i = 0; i < output_count; ++i) {
