@@ -1,0 +1,139 @@
+Support any dim order (e.g. channels-last) in the portable kernels that copy
+in blocks: cat, split_with_sizes_copy and slice_copy/narrow_copy. Upstream
+(pytorch/executorch#21865) rejects non-default dim orders in these kernels.
+
+diff --git a/kernels/portable/cpu/op_cat.cpp b/kernels/portable/cpu/op_cat.cpp
+index 17fdc8f..4ca361b 100644
+--- a/kernels/portable/cpu/op_cat.cpp
++++ b/kernels/portable/cpu/op_cat.cpp
+@@ -28,10 +28,6 @@ Tensor& cat_out(
+ 
+   ET_KERNEL_CHECK(ctx, check_cat_args(tensors, dim, out), InvalidArgument, out);
+ 
+-  // check_cat_args already requires every input to share out's dim order, so
+-  // checking out is enough to force all of them to the default.
+-  ET_KERNEL_CHECK(ctx, tensor_is_default_dim_order(out), InvalidArgument, out);
+-
+   Tensor::SizesType expected_out_size[kTensorDimensionLimit];
+   size_t expected_out_dim = 0;
+   ET_KERNEL_CHECK(
+@@ -60,8 +56,10 @@ Tensor& cat_out(
+     return out;
+   }
+ 
+-  const size_t outer = getLeadingDims(out, dim);
+-  const size_t dim_stride = getTrailingDims(out, dim);
++  // OpenMV: check_cat_args requires every input to share out's dim order, so
++  // the blocks are computed in memory order to support any dim order.
++  const size_t outer = getLeadingDimsInMemory(out, dim);
++  const size_t dim_stride = getTrailingDimsInMemory(out, dim);
+   const size_t ninputs = tensors.size();
+ 
+   const auto out_type = out.scalar_type();
+diff --git a/kernels/portable/cpu/op_split_with_sizes_copy.cpp b/kernels/portable/cpu/op_split_with_sizes_copy.cpp
+index 0353e04..29ac3cd 100644
+--- a/kernels/portable/cpu/op_split_with_sizes_copy.cpp
++++ b/kernels/portable/cpu/op_split_with_sizes_copy.cpp
+@@ -43,8 +43,6 @@ void split_with_sizes_copy_out(
+   for (const auto i : c10::irange(out.size())) {
+     ET_KERNEL_CHECK(
+         ctx, tensors_have_same_dim_order(in, out[i]), InvalidArgument, );
+-    ET_KERNEL_CHECK(
+-        ctx, tensor_is_default_dim_order(out[i]), InvalidArgument, );
+   }
+ 
+   // If out is empty, then nothing needs to be done after checking the args.
+@@ -69,8 +67,10 @@ void split_with_sizes_copy_out(
+         InvalidArgument, );
+   }
+ 
+-  const size_t leading_dims = getLeadingDims(in, dim);
+-  const size_t trailing_dims = getTrailingDims(in, dim);
++  // OpenMV: the outputs share the input's dim order, so the blocks are
++  // computed in memory order to support any dim order.
++  const size_t leading_dims = getLeadingDimsInMemory(in, dim);
++  const size_t trailing_dims = getTrailingDimsInMemory(in, dim);
+   const size_t step = in.size(dim) * trailing_dims;
+ 
+   ScalarType in_type = in.scalar_type();
+diff --git a/kernels/portable/cpu/util/slice_util.cpp b/kernels/portable/cpu/util/slice_util.cpp
+index d298297..4c0f89b 100644
+--- a/kernels/portable/cpu/util/slice_util.cpp
++++ b/kernels/portable/cpu/util/slice_util.cpp
+@@ -185,8 +185,10 @@ void compute_slice(
+       /* void */,
+       "Requested slice is larger than the dim size");
+ 
+-  size_t leading_dims = getLeadingDims(in, dim);
+-  size_t trailing_dims = getTrailingDims(in, dim);
++  // OpenMV: the input and output share a dim order, so the blocks are
++  // computed in memory order to support any dim order.
++  size_t leading_dims = getLeadingDimsInMemory(in, dim);
++  size_t trailing_dims = getTrailingDimsInMemory(in, dim);
+ 
+   if (trailing_dims == 0) {
+     return;
+diff --git a/runtime/core/exec_aten/util/tensor_util.h b/runtime/core/exec_aten/util/tensor_util.h
+index b9cbab4..447ef92 100644
+--- a/runtime/core/exec_aten/util/tensor_util.h
++++ b/runtime/core/exec_aten/util/tensor_util.h
+@@ -967,6 +967,50 @@ inline size_t getTrailingDims(
+   return dims;
+ }
+ 
++/// OpenMV: Returns the product of the sizes of the dims that come before dim in
++/// the tensor's dim order, i.e. in memory. Equal to getLeadingDims() for the
++/// default dim order. Kernels that copy in blocks use these to support any dim
++/// order (e.g. channels-last) shared by their inputs and outputs.
++inline size_t getLeadingDimsInMemory(
++    const executorch::aten::Tensor& tensor,
++    int64_t dim) {
++  const auto dim_order = tensor.dim_order();
++  size_t dims = 1;
++  for (size_t i = 0; i < dim_order.size() && dim_order[i] != dim; ++i) {
++    size_t next_dims;
++    ET_CHECK_MSG(
++        !c10::mul_overflows(
++            dims, static_cast<size_t>(tensor.size(dim_order[i])), &next_dims),
++        "Overflow computing leading dims at dimension %zu",
++        i);
++    dims = next_dims;
++  }
++  return dims;
++}
++
++/// OpenMV: Returns the product of the sizes of the dims that come after dim in
++/// the tensor's dim order. Equal to getTrailingDims() for the default dim order.
++inline size_t getTrailingDimsInMemory(
++    const executorch::aten::Tensor& tensor,
++    int64_t dim) {
++  const auto dim_order = tensor.dim_order();
++  size_t i = 0;
++  while (i < dim_order.size() && dim_order[i] != dim) {
++    ++i;
++  }
++  size_t dims = 1;
++  for (++i; i < dim_order.size(); ++i) {
++    size_t next_dims;
++    ET_CHECK_MSG(
++        !c10::mul_overflows(
++            dims, static_cast<size_t>(tensor.size(dim_order[i])), &next_dims),
++        "Overflow computing trailing dims at dimension %zu",
++        i);
++    dims = next_dims;
++  }
++  return dims;
++}
++
+ /**
+  * Given a N-dimensional tensor coordinate, return a linear index that can be
+  * used to access the corresponding element in the tensor's data buffer.
+@@ -1382,6 +1426,8 @@ using ::executorch::ET_RUNTIME_NAMESPACE::extract_scalar_tensor;
+ using ::executorch::ET_RUNTIME_NAMESPACE::get_dim_order;
+ using ::executorch::ET_RUNTIME_NAMESPACE::getLeadingDims;
+ using ::executorch::ET_RUNTIME_NAMESPACE::getTrailingDims;
++using ::executorch::ET_RUNTIME_NAMESPACE::getLeadingDimsInMemory;
++using ::executorch::ET_RUNTIME_NAMESPACE::getTrailingDimsInMemory;
+ using ::executorch::ET_RUNTIME_NAMESPACE::indexToCoordinate;
+ using ::executorch::ET_RUNTIME_NAMESPACE::nonempty_size;
+ using ::executorch::ET_RUNTIME_NAMESPACE::nonzero_dim;

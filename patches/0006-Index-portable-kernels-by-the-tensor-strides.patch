@@ -1,0 +1,172 @@
+Backport of pytorch/executorch#21828, kernel changes only (its unit tests are
+not built here). Remove when ExecuTorch is updated to a release that includes it.
+
+diff --git a/kernels/portable/cpu/op_flip.cpp b/kernels/portable/cpu/op_flip.cpp
+index 41ec666..8a381fc 100644
+--- a/kernels/portable/cpu/op_flip.cpp
++++ b/kernels/portable/cpu/op_flip.cpp
+@@ -21,22 +21,6 @@ bool check_flip_args(const Tensor& in, IntArrayRef dims, const Tensor& out) {
+   return check_dim_list_is_valid(in, dims);
+ }
+ 
+-size_t unflip_flat_ix(size_t ix, const Tensor& in, ArrayRef<bool> flip_dim) {
+-  size_t ix_coord[kTensorDimensionLimit];
+-  indexToCoordinate(in, ix, ix_coord);
+-
+-  size_t unflip_coord[kTensorDimensionLimit];
+-  for (const auto d : c10::irange(in.dim())) {
+-    if (flip_dim[d]) {
+-      unflip_coord[d] = in.size(d) - ix_coord[d] - 1;
+-    } else {
+-      unflip_coord[d] = ix_coord[d];
+-    }
+-  }
+-
+-  return coordinateToIndex(in, unflip_coord);
+-}
+-
+ } // namespace
+ 
+ Tensor& flip_out(
+@@ -72,8 +56,22 @@ Tensor& flip_out(
+     const CTYPE* in_data = in.const_data_ptr<CTYPE>();
+     CTYPE* out_data = out.mutable_data_ptr<CTYPE>();
+ 
++    const bool out_is_default = executorch::runtime::is_contiguous_dim_order(
++        out.dim_order().data(), out.dim_order().size());
++
+     for (const auto ix : c10::irange(in.numel())) {
+-      out_data[ix] = in_data[unflip_flat_ix(ix, in, flip_dim)];
++      // @lint-ignore CLANGTIDY facebook-hte-CArray
++      size_t coord[kTensorDimensionLimit];
++      indexToCoordinate(in, ix, coord);
++
++      // @lint-ignore CLANGTIDY facebook-hte-CArray
++      size_t src_coord[kTensorDimensionLimit];
++      for (const auto d : c10::irange(in.dim())) {
++        src_coord[d] = flip_dim[d] ? in.size(d) - coord[d] - 1 : coord[d];
++      }
++
++      out_data[out_is_default ? ix : coordinateToIndex(out, coord)] =
++          in_data[coordinateToIndex(in, src_coord)];
+     }
+   });
+ 
+diff --git a/kernels/portable/cpu/op_permute_copy.cpp b/kernels/portable/cpu/op_permute_copy.cpp
+index 719f8fc..6343d1c 100644
+--- a/kernels/portable/cpu/op_permute_copy.cpp
++++ b/kernels/portable/cpu/op_permute_copy.cpp
+@@ -71,8 +71,19 @@ Tensor& permute_copy_out(
+     const CTYPE* const in_data = in.const_data_ptr<CTYPE>();
+     CTYPE* const out_data = out.mutable_data_ptr<CTYPE>();
+ 
++    const bool out_is_default = executorch::runtime::is_contiguous_dim_order(
++        out.dim_order().data(), out.dim_order().size());
++
+     for (const auto i : c10::irange(out.numel())) {
+-      out_data[i] =
++      size_t out_ix = i;
++      if (!out_is_default) {
++        // @lint-ignore CLANGTIDY facebook-hte-CArray
++        size_t out_coord[kTensorDimensionLimit];
++        indexToCoordinate(out, i, out_coord);
++        out_ix = coordinateToIndex(out, out_coord);
++      }
++
++      out_data[out_ix] =
+           in_data[executorch::runtime::coordinateToIndexWithTrailingDimsMemo(
+               in, in_coord, trailing_dims_memo)];
+       increment_coordinate_permuted(in, in_coord, dims);
+diff --git a/kernels/portable/cpu/op_roll.cpp b/kernels/portable/cpu/op_roll.cpp
+index 4d314b3..c510aa9 100644
+--- a/kernels/portable/cpu/op_roll.cpp
++++ b/kernels/portable/cpu/op_roll.cpp
+@@ -32,19 +32,6 @@ bool check_roll_args(
+   return true;
+ }
+ 
+-size_t unshift_flat_ix(size_t ix, const Tensor& in, IntArrayRef dim_shifts) {
+-  size_t ix_coord[kTensorDimensionLimit];
+-  indexToCoordinate(in, ix, ix_coord);
+-
+-  size_t shifted_coord[kTensorDimensionLimit];
+-  for (const auto d : c10::irange(in.dim())) {
+-    shifted_coord[d] =
+-        (ix_coord[d] + in.size(d) - dim_shifts[d] % in.size(d)) % in.size(d);
+-  }
+-
+-  return coordinateToIndex(in, shifted_coord);
+-}
+-
+ } // namespace
+ 
+ Tensor& roll_out(
+@@ -86,8 +73,23 @@ Tensor& roll_out(
+     const CTYPE* in_data = in.const_data_ptr<CTYPE>();
+     CTYPE* out_data = out.mutable_data_ptr<CTYPE>();
+ 
++    const bool out_is_default = executorch::runtime::is_contiguous_dim_order(
++        out.dim_order().data(), out.dim_order().size());
++
+     for (const auto ix : c10::irange(out.numel())) {
+-      out_data[ix] = in_data[unshift_flat_ix(ix, in, dim_shifts)];
++      // @lint-ignore CLANGTIDY facebook-hte-CArray
++      size_t coord[kTensorDimensionLimit];
++      indexToCoordinate(in, ix, coord);
++
++      // @lint-ignore CLANGTIDY facebook-hte-CArray
++      size_t shifted_coord[kTensorDimensionLimit];
++      for (const auto d : c10::irange(in.dim())) {
++        shifted_coord[d] =
++            (coord[d] + in.size(d) - dim_shifts[d] % in.size(d)) % in.size(d);
++      }
++
++      out_data[out_is_default ? ix : coordinateToIndex(out, coord)] =
++          in_data[coordinateToIndex(in, shifted_coord)];
+     }
+   });
+ 
+diff --git a/kernels/portable/cpu/op_scatter_add.cpp b/kernels/portable/cpu/op_scatter_add.cpp
+index 690c313..e1cb5d8 100644
+--- a/kernels/portable/cpu/op_scatter_add.cpp
++++ b/kernels/portable/cpu/op_scatter_add.cpp
+@@ -67,9 +67,6 @@ Tensor& scatter_add_out(
+   ET_KERNEL_CHECK(
+       ctx, tensors_have_same_dim_order(self, src, out), InvalidArgument, out);
+ 
+-  ET_KERNEL_CHECK(
+-      ctx, tensor_is_default_dim_order(index), InvalidArgument, out);
+-
+   if (dim < 0) {
+     dim += nonzero_dim(self);
+   }
+diff --git a/runtime/core/exec_aten/util/tensor_util.h b/runtime/core/exec_aten/util/tensor_util.h
+index 00ea924..fda71bc 100644
+--- a/runtime/core/exec_aten/util/tensor_util.h
++++ b/runtime/core/exec_aten/util/tensor_util.h
+@@ -1025,8 +1025,9 @@ inline size_t coordinateToIndex(
+     const executorch::aten::Tensor& tensor,
+     const size_t* const coordinate) {
+   size_t index = 0;
++  const auto strides = tensor.strides();
+   for (const auto d : c10::irange(tensor.dim())) {
+-    index += coordinate[d] * getTrailingDims(tensor, d);
++    index += coordinate[d] * static_cast<size_t>(strides[d]);
+   }
+   return index;
+ }
+@@ -1039,11 +1040,9 @@ inline size_t coordinateToIndex(
+ inline void memoizeTrailingDims(
+     const executorch::aten::Tensor& tensor,
+     size_t trailing_dims_memo[kTensorDimensionLimit]) {
+-  const auto tensorDim = tensor.dim();
+-  size_t dims = 1;
+-  for (int ii = tensorDim - 1; ii >= 0; --ii) {
+-    trailing_dims_memo[ii] = dims;
+-    dims *= static_cast<size_t>(tensor.size(ii));
++  const auto strides = tensor.strides();
++  for (const auto d : c10::irange(tensor.dim())) {
++    trailing_dims_memo[d] = static_cast<size_t>(strides[d]);
+   }
+ }
+ 
