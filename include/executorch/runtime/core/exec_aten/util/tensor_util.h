@@ -967,50 +967,6 @@ inline size_t getTrailingDims(
   return dims;
 }
 
-/// OpenMV: Returns the product of the sizes of the dims that come before dim in
-/// the tensor's dim order, i.e. in memory. Equal to getLeadingDims() for the
-/// default dim order. Kernels that copy in blocks use these to support any dim
-/// order (e.g. channels-last) shared by their inputs and outputs.
-inline size_t getLeadingDimsInMemory(
-    const executorch::aten::Tensor& tensor,
-    int64_t dim) {
-  const auto dim_order = tensor.dim_order();
-  size_t dims = 1;
-  for (size_t i = 0; i < dim_order.size() && dim_order[i] != dim; ++i) {
-    size_t next_dims;
-    ET_CHECK_MSG(
-        !c10::mul_overflows(
-            dims, static_cast<size_t>(tensor.size(dim_order[i])), &next_dims),
-        "Overflow computing leading dims at dimension %zu",
-        i);
-    dims = next_dims;
-  }
-  return dims;
-}
-
-/// OpenMV: Returns the product of the sizes of the dims that come after dim in
-/// the tensor's dim order. Equal to getTrailingDims() for the default dim order.
-inline size_t getTrailingDimsInMemory(
-    const executorch::aten::Tensor& tensor,
-    int64_t dim) {
-  const auto dim_order = tensor.dim_order();
-  size_t i = 0;
-  while (i < dim_order.size() && dim_order[i] != dim) {
-    ++i;
-  }
-  size_t dims = 1;
-  for (++i; i < dim_order.size(); ++i) {
-    size_t next_dims;
-    ET_CHECK_MSG(
-        !c10::mul_overflows(
-            dims, static_cast<size_t>(tensor.size(dim_order[i])), &next_dims),
-        "Overflow computing trailing dims at dimension %zu",
-        i);
-    dims = next_dims;
-  }
-  return dims;
-}
-
 /**
  * Given a N-dimensional tensor coordinate, return a linear index that can be
  * used to access the corresponding element in the tensor's data buffer.
@@ -1025,9 +981,8 @@ inline size_t coordinateToIndex(
     const executorch::aten::Tensor& tensor,
     const size_t* const coordinate) {
   size_t index = 0;
-  const auto strides = tensor.strides();
   for (const auto d : c10::irange(tensor.dim())) {
-    index += coordinate[d] * static_cast<size_t>(strides[d]);
+    index += coordinate[d] * getTrailingDims(tensor, d);
   }
   return index;
 }
@@ -1040,9 +995,11 @@ inline size_t coordinateToIndex(
 inline void memoizeTrailingDims(
     const executorch::aten::Tensor& tensor,
     size_t trailing_dims_memo[kTensorDimensionLimit]) {
-  const auto strides = tensor.strides();
-  for (const auto d : c10::irange(tensor.dim())) {
-    trailing_dims_memo[d] = static_cast<size_t>(strides[d]);
+  const auto tensorDim = tensor.dim();
+  size_t dims = 1;
+  for (int ii = tensorDim - 1; ii >= 0; --ii) {
+    trailing_dims_memo[ii] = dims;
+    dims *= static_cast<size_t>(tensor.size(ii));
   }
 }
 
@@ -1425,8 +1382,6 @@ using ::executorch::ET_RUNTIME_NAMESPACE::extract_scalar_tensor;
 using ::executorch::ET_RUNTIME_NAMESPACE::get_dim_order;
 using ::executorch::ET_RUNTIME_NAMESPACE::getLeadingDims;
 using ::executorch::ET_RUNTIME_NAMESPACE::getTrailingDims;
-using ::executorch::ET_RUNTIME_NAMESPACE::getLeadingDimsInMemory;
-using ::executorch::ET_RUNTIME_NAMESPACE::getTrailingDimsInMemory;
 using ::executorch::ET_RUNTIME_NAMESPACE::indexToCoordinate;
 using ::executorch::ET_RUNTIME_NAMESPACE::nonempty_size;
 using ::executorch::ET_RUNTIME_NAMESPACE::nonzero_dim;
