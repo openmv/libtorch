@@ -167,41 +167,6 @@ ci_build_target() {
     TARGET_CXXFLAGS="${TARGET_FLAGS} -fno-rtti -fno-exceptions -fno-unwind-tables \
 -fno-use-cxa-atexit -fno-threadsafe-statics"
 
-    # Build the runtime, the prim ops (executorch) and the kernel libraries. CMSIS-NN
-    # is provided by the firmware; it is only downloaded here for its headers, and its
-    # version must match the firmware's.
-    # Kernel registration is generated below (manual registration), so the upstream
-    # ops_lib targets, which register from static initializers, are not built.
-    cmake -S ${ET_DIR} -B ${BUILD_DIR} \
-        -DCMAKE_SYSTEM_NAME=Generic \
-        -DCMAKE_SYSTEM_PROCESSOR=${TARGET_CPU} \
-        -DCMAKE_C_COMPILER=arm-none-eabi-gcc \
-        -DCMAKE_CXX_COMPILER=arm-none-eabi-g++ \
-        -DCMAKE_ASM_COMPILER=arm-none-eabi-gcc \
-        -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
-        -DCMAKE_C_FLAGS="${TARGET_FLAGS}" \
-        -DCMAKE_CXX_FLAGS="${TARGET_CXXFLAGS}" \
-        -DCMAKE_C_FLAGS_RELEASE="-O2 -DNDEBUG" \
-        -DCMAKE_CXX_FLAGS_RELEASE="-O2 -DNDEBUG" \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_POSITION_INDEPENDENT_CODE=OFF \
-        -DPYTHON_EXECUTABLE=${PYTHON} \
-        -DEXECUTORCH_BUILD_PRESET_FILE=${ET_DIR}/tools/cmake/preset/arm_baremetal.cmake \
-        ${NPU_ARGS} \
-        -DEXECUTORCH_BUILD_PTHREADPOOL=OFF \
-        -DEXECUTORCH_BUILD_CPUINFO=OFF \
-        -DEXECUTORCH_BUILD_EXTENSION_RUNNER_UTIL=OFF \
-        -DEXECUTORCH_BUILD_CORTEX_M=ON \
-        -DEXECUTORCH_BUILD_KERNELS_QUANTIZED=ON \
-        -DEXECUTORCH_ENABLE_LOGGING=OFF \
-        -DEXECUTORCH_ENABLE_PROGRAM_VERIFICATION=OFF \
-        -DEXECUTORCH_OPTIMIZE_SIZE=OFF \
-        -DEXECUTORCH_PAL_DEFAULT=minimal \
-        -DCMSIS_NN_VERSION=${CMSIS_NN_VERSION}
-    cmake --build ${BUILD_DIR} -j$(nproc) --target \
-        executorch_core executorch portable_kernels kernels_util_all_deps \
-        quantized_kernels cortex_m_kernels ${NPU_LIBS}
-
     # Generate one manual registration function per kernel library. The libraries are
     # generated separately because the codegen indexes kernels by name without the
     # namespace (cortex_m:: and quantized_decomposed:: operators collide).
@@ -229,6 +194,45 @@ ci_build_target() {
             ${GEN_DIR}/${LIB_NAME}/RegisterKernelsEverything.cpp > ${GEN_DIR}/${LIB_NAME}/register.cpp
     done
     popd
+
+    # Size the kernel registry to the kernels registered by et_register_all (prim ops
+    # plus the generated kernels), instead of the default 2000 slots.
+    KERNEL_COUNT=$(cat ${ET_DIR}/kernels/prim_ops/register_prim_ops.cpp ${GEN_DIR}/*/register.cpp | grep -c "Kernel(")
+
+    # Build the runtime, the prim ops (executorch) and the kernel libraries. CMSIS-NN
+    # is provided by the firmware; it is only downloaded here for its headers, and its
+    # version must match the firmware's.
+    # Kernel registration is generated above (manual registration), so the upstream
+    # ops_lib targets, which register from static initializers, are not built.
+    cmake -S ${ET_DIR} -B ${BUILD_DIR} \
+        -DCMAKE_SYSTEM_NAME=Generic \
+        -DCMAKE_SYSTEM_PROCESSOR=${TARGET_CPU} \
+        -DCMAKE_C_COMPILER=arm-none-eabi-gcc \
+        -DCMAKE_CXX_COMPILER=arm-none-eabi-g++ \
+        -DCMAKE_ASM_COMPILER=arm-none-eabi-gcc \
+        -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
+        -DCMAKE_C_FLAGS="${TARGET_FLAGS}" \
+        -DCMAKE_CXX_FLAGS="${TARGET_CXXFLAGS} -DMAX_KERNEL_NUM=${KERNEL_COUNT}" \
+        -DCMAKE_C_FLAGS_RELEASE="-O2 -DNDEBUG" \
+        -DCMAKE_CXX_FLAGS_RELEASE="-O2 -DNDEBUG" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_POSITION_INDEPENDENT_CODE=OFF \
+        -DPYTHON_EXECUTABLE=${PYTHON} \
+        -DEXECUTORCH_BUILD_PRESET_FILE=${ET_DIR}/tools/cmake/preset/arm_baremetal.cmake \
+        ${NPU_ARGS} \
+        -DEXECUTORCH_BUILD_PTHREADPOOL=OFF \
+        -DEXECUTORCH_BUILD_CPUINFO=OFF \
+        -DEXECUTORCH_BUILD_EXTENSION_RUNNER_UTIL=OFF \
+        -DEXECUTORCH_BUILD_CORTEX_M=ON \
+        -DEXECUTORCH_BUILD_KERNELS_QUANTIZED=ON \
+        -DEXECUTORCH_ENABLE_LOGGING=OFF \
+        -DEXECUTORCH_ENABLE_PROGRAM_VERIFICATION=ON \
+        -DEXECUTORCH_OPTIMIZE_SIZE=OFF \
+        -DEXECUTORCH_PAL_DEFAULT=minimal \
+        -DCMSIS_NN_VERSION=${CMSIS_NN_VERSION}
+    cmake --build ${BUILD_DIR} -j$(nproc) --target \
+        executorch_core executorch portable_kernels kernels_util_all_deps \
+        quantized_kernels cortex_m_kernels ${NPU_LIBS}
 
     # Entry point called by the firmware to register all kernels and backends.
     REGISTER_NPU_DECL=""
@@ -283,7 +287,7 @@ EOF
         obj=${src%.cpp}.o
         arm-none-eabi-g++ ${TARGET_CXXFLAGS} -O2 -DNDEBUG -std=gnu++17 \
             -DC10_USING_CUSTOM_GENERATED_MACROS -DET_LOG_ENABLED=0 \
-            -DET_ENABLE_PROGRAM_VERIFICATION=0 -DET_ENABLE_DEPRECATED_CONSTANT_BUFFER=0 \
+            -DET_ENABLE_PROGRAM_VERIFICATION=1 -DET_ENABLE_DEPRECATED_CONSTANT_BUFFER=0 \
             -I${ET_DIR}/.. -I${ET_DIR}/runtime/core/portable_type/c10 -I${BUILD_DIR}/include \
             -I$(dirname ${src}) -c ${src} -o ${obj}
         REGISTER_OBJS="${REGISTER_OBJS} ${obj}"
